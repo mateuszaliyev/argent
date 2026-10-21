@@ -10,7 +10,7 @@ import {
   type ServiceEvents,
 } from "@argent/registry";
 import { assertExternalCapability, externalClaimForAnyId } from "../utils/external-devices";
-import { socketTag } from "../utils/socket-tag";
+import { nativeDevtoolsSocketPath } from "../utils/socket-tag";
 import {
   pickIosHost,
   buildDyldInsertLibraries,
@@ -502,14 +502,6 @@ interface AppConnection {
   networkLog: NetworkEvent[];
 }
 
-function getNativeDevtoolsSocketPath(udid: string): string {
-  /**
-   * Deterministic and short, at most 32 chars, well under the 104-char macOS
-   * Unix socket limit.
-   */
-  return `/tmp/argent-nd-${socketTag(udid)}.sock`;
-}
-
 /**
  * Bind the per-UDID unix socket with the same guarded, self-healing treatment
  * the TCP branch gets. Exported for testing.
@@ -642,7 +634,7 @@ export const nativeDevtoolsBlueprint: ServiceBlueprint<NativeDevtoolsApi, Device
       : (opts.transport ?? "unix");
 
     const udid = device.id;
-    const socketPath = getNativeDevtoolsSocketPath(udid);
+    const socketPath = nativeDevtoolsSocketPath(udid);
     // For TCP, `port` starts undefined (ephemeral) and is populated by the
     // listen block below, before ensureEnvReady and dispose read it.
     const endpoint: IosEndpoint =

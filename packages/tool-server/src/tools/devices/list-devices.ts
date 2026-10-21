@@ -258,28 +258,27 @@ function toListedExternal(device: ExternalDevice, foldable: boolean): ExternalLi
   };
 }
 
+type ExternalEntry = { device: ExternalDevice; foldable: boolean };
+
 /**
- * Whether each external device is a foldable simulator. The plain simctl row a
- * provider's simulator shadows (its device set is in
- * `ios.additionalDeviceSets`) already carries the verdict; otherwise it is read
- * from the provider's device set, memoized per UDID. A foldable only differs
- * in which panel shows the UI, so an agent needs the flag to know `fold`
- * applies, whoever drives the device.
+ * Pair each external device with whether it is a foldable simulator (the iPhone
+ * Duo), read from the provider's device set. An agent needs the flag to know
+ * `fold` applies, whoever drives the device. This runs inside the external
+ * discovery branch, so it overlaps the other branches instead of adding to
+ * them; the branch's worst case (a provider probe, then one `simctl` listing
+ * and one device-type read) stays under `BRANCH_DEADLINE_MS`.
+ * `isFoldableSimulator` memoizes every verdict the device set answers, so a
+ * simulator the set lists costs one `simctl` call per tool-server run.
  */
-async function externalFoldables(
-  external: readonly ExternalDevice[],
-  ios: readonly IosSimulator[]
-): Promise<boolean[]> {
-  const listed = new Map(ios.map((sim) => [sim.udid, sim.foldable === true]));
-
+async function withFoldableFlags(external: readonly ExternalDevice[]): Promise<ExternalEntry[]> {
   return Promise.all(
-    external.map(async (device) => {
-      if (device.platform !== "ios" || device.kind !== "simulator") return false;
-
-      return (
-        listed.get(device.nativeId) ?? (await isFoldableSimulator(device.id).catch(() => false))
-      );
-    })
+    external.map(async (device) => ({
+      device,
+      foldable:
+        device.platform === "ios" &&
+        device.kind === "simulator" &&
+        (await isFoldableSimulator(device.id).catch(() => false)),
+    }))
   );
 }
 
@@ -363,22 +362,19 @@ Booted/ready devices are listed first. Platforms whose CLI is unavailable are si
         ),
         /**
          * One directory stat when no provider is registered (the common case)
-         * and a short HTTP probe per provider otherwise.
+         * and a short HTTP probe per provider otherwise, then the foldable
+         * check of each lent simulator.
          */
         withDeadline(
-          listExternalDevices().catch(() => []),
+          listExternalDevices()
+            .catch(() => [])
+            .then(withFoldableFlags),
           [],
           "external"
         ),
       ]);
 
-    const externalShadows = externalShadowIds(external);
-
-    const externalFoldable = await withDeadline(
-      externalFoldables(external, ios),
-      external.map(() => false),
-      "external-foldable"
-    );
+    const externalShadows = externalShadowIds(external.map(({ device }) => device));
 
     const iosTagged: IosDevice[] = ios
       .filter((simulator) => !externalShadows.has(simulator.udid))
@@ -426,7 +422,7 @@ Booted/ready devices are listed first. Platforms whose CLI is unavailable are si
       ...androidDeduped,
       ...chromium,
       ...vega,
-      ...external.map((device, i) => toListedExternal(device, externalFoldable[i] === true)),
+      ...external.map(({ device, foldable }) => toListedExternal(device, foldable)),
     ];
     devices.sort((a, b) => readinessRank(a) - readinessRank(b));
 
