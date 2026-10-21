@@ -156,15 +156,21 @@ export const NATIVE_DEVTOOLS_CONNECT_BUDGET_MS = 15_000;
 
 /**
  * How long attach mode waits, after the provider's socket accepts us, for the
- * `Control` frame that names the app it is lending. Until it lands nothing is
- * in `connections`, so a factory that resolved on `connect` alone handed the
- * very first call a service that answered "not connected".
+ * `Control` frame that names the app it is lending. Until that frame lands
+ * nothing is in `connections` and every RPC answers "not connected".
  *
  * A provider re-serving a live agent connection has the bundle id in hand and
  * sends it straight after accept, so this only needs to cover a loaded host's
- * scheduling, not an app's cold start. Past it the factory resolves anyway (the
- * pre-wait behaviour) so a provider that is slow or has no app on offer yet,
- * still attaches and the tool's own not-connected error names the bundle.
+ * scheduling, not an app's cold start. Past it the factory resolves anyway, so
+ * a provider that is slow or has no app on offer yet still attaches, the tool's
+ * own not-connected error names the bundle and the app is adopted once the
+ * provider names it.
+ *
+ * This also bounds startup: the simulator watcher's first poll resolves this
+ * service for every booted simulator a provider lends with `native-devtools`,
+ * and the tool-server binds only after that poll. A provider that holds the
+ * frame back delays startup by up to this long, once, since the watcher
+ * resolves its simulators in parallel.
  */
 export const NATIVE_DEVTOOLS_ATTACH_HANDSHAKE_TIMEOUT_MS = 2_000;
 
@@ -933,8 +939,8 @@ export const nativeDevtoolsBlueprint: ServiceBlueprint<NativeDevtoolsApi, Device
       /**
        * Hold the factory until the provider's opening `Control` frame puts the
        * app in `connections`. Accept alone proves only that the provider is
-       * listening: resolving there let the readiness gate pass this service
-       * (`provider_attached`) to a first RPC that found no connection.
+       * listening and the readiness gate passes attach mode straight through
+       * (`provider_attached`), so the app has to be there before the first RPC.
        *
        * @see {@linkcode NATIVE_DEVTOOLS_ATTACH_HANDSHAKE_TIMEOUT_MS}
        */
@@ -960,7 +966,8 @@ export const nativeDevtoolsBlueprint: ServiceBlueprint<NativeDevtoolsApi, Device
       if (hungUpBeforeHandshake) {
         throw new FailureError(
           `${NATIVE_DEVTOOLS_NAMESPACE} lost the agent connection its provider was lending ` +
-            `before the provider named the app it serves.`,
+            `before the provider named the app it serves. Retry the call to attach again; if it ` +
+            `keeps failing, run list-devices to see what the provider is offering now.`,
           {
             error_code: FAILURE_CODES.NATIVE_DEVTOOLS_ATTACH_LOST,
             error_kind: "network",

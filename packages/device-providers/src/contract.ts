@@ -333,9 +333,9 @@ const jsDebuggerSchema = z.object({
  * agent does (`{ type: "Control" | "ViewInspector" | "CDP", payload }`),
  * opening with a `Control` frame naming the connected `bundleId`.
  *
- * Send that frame promptly after accepting: Argent holds the attach for a short
- * window (about two seconds) waiting for it and calls made before it arrives
- * fail as "not connected".
+ * Send that frame promptly after accepting: Argent waits up to about two
+ * seconds for it before it uses the connection. If it has not arrived by then,
+ * calls fail as "not connected" until it does.
  */
 const nativeDevtoolsSchema = z.object({
   /**

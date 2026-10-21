@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { FAILURE_CODES, getFailureSignal } from "@argent/registry";
 import {
   NATIVE_DEVTOOLS_ATTACH_HANDSHAKE_TIMEOUT_MS,
   nativeDevtoolsBlueprint,
@@ -321,17 +322,21 @@ describe("a provider that lends its native-devtools agent", () => {
   /**
    * Accept proves only that the provider is listening; the app is not in the
    * connection map until its `Control` frame lands. The readiness gate lets
-   * attach mode straight through, so a factory that resolved on accept handed
-   * the first call of a session a "not connected" error that a retry fixed.
+   * attach mode straight through, so the factory waits for that frame and the
+   * first call of a session finds the app.
    */
   describe("before the provider has named its app", () => {
     it("serves the very first RPC once a prompt handshake lands", async () => {
       const agent = await startLentAgent({ handshake: { delayMs: 100 } });
       publishDescriptor({ socketPath: agent.socketPath });
 
+      const startedAt = Date.now();
       const instance = await instantiate();
 
-      /** No `waitForConnectedBundle`: the first call is the one that failed. */
+      /** The frame ends the wait; the attach does not sit out the timeout. */
+      expect(Date.now() - startedAt).toBeLessThan(NATIVE_DEVTOOLS_ATTACH_HANDSHAKE_TIMEOUT_MS / 2);
+
+      /** No `waitForConnectedBundle`: the very first call must find the app. */
       expect(instance.api.isConnected(BUNDLE_ID)).toBe(true);
       await expect(
         instance.api.queryViewHierarchy(BUNDLE_ID, "ViewHierarchy.describeScreen")
@@ -342,8 +347,8 @@ describe("a provider that lends its native-devtools agent", () => {
     });
 
     /**
-     * A provider with no app on offer yet must still attach, as it did before
-     * the wait existed and adopt the app once it names one.
+     * A provider with no app on offer yet must still attach and adopt the app
+     * once it names one.
      */
     it(
       "attaches anyway when no handshake arrives in time, and adopts a late one",
@@ -388,7 +393,19 @@ describe("a provider that lends its native-devtools agent", () => {
 
       agent.hangUp();
 
-      await expect(attaching).rejects.toThrow(/before the provider named the app/);
+      const error = await attaching.then(
+        () => undefined,
+        (reason: unknown) => reason
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/before the provider named the app/);
+      expect(getFailureSignal(error)).toEqual({
+        error_code: FAILURE_CODES.NATIVE_DEVTOOLS_ATTACH_LOST,
+        error_kind: "network",
+        failure_area: "tool_server",
+        failure_stage: "native_devtools_attach",
+      });
 
       await agent.close();
     });
