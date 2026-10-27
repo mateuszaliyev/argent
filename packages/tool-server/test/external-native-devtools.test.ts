@@ -43,6 +43,8 @@ let temporaryDirectory: string;
 type LentAgent = {
   close: () => Promise<void>;
   hangUp: () => void;
+  /** Calls back when the next socket closes, i.e. when we hang up. */
+  onPeerClosed: (callback: () => void) => void;
   peerCount: () => number;
   received: Array<{ type: string; payload: Record<string, unknown> }>;
   /** Sends the opening `Control` frame on every socket still waiting for it. */
@@ -63,12 +65,14 @@ async function startLentAgent(
   const received: LentAgent["received"] = [];
   const sockets: net.Socket[] = [];
   const awaitingHandshake: net.Socket[] = [];
+  const closeWaiters: Array<() => void> = [];
 
   const sendControl = (socket: net.Socket) =>
     socket.write(JSON.stringify({ payload: { bundleId: BUNDLE_ID }, type: "Control" }) + "\n");
 
   const server = net.createServer((socket) => {
     sockets.push(socket);
+    socket.on("close", () => closeWaiters.splice(0).forEach((callback) => callback()));
     if (handshake === "immediate") sendControl(socket);
     else if (handshake === "manual") awaitingHandshake.push(socket);
     else setTimeout(() => sendControl(socket), handshake.delayMs);
@@ -97,6 +101,7 @@ async function startLentAgent(
     hangUp: () => {
       for (const socket of sockets.splice(0)) socket.destroy();
     },
+    onPeerClosed: (callback) => closeWaiters.push(callback),
     peerCount: () => sockets.length,
     received,
     sendHandshake: () => {
@@ -132,12 +137,15 @@ function publishDescriptor(options: { socketPath?: string } = {}): void {
   process.env.ARGENT_DEVICE_PROVIDERS = descriptorPath;
 }
 
-function instantiate(deviceId = DEVICE_ID) {
+function instantiate(deviceId = DEVICE_ID, signal?: AbortSignal) {
   const device = resolveDevice(deviceId);
-  return nativeDevtoolsBlueprint.factory({}, device, { device });
+  return nativeDevtoolsBlueprint.factory({}, device, { device }, signal);
 }
 
-/** The handshake lands a tick after connect. Wait for the app to show up. */
+/**
+ * Wait for a handshake that lands after `instantiate()` resolved. One that
+ * comes in time is already in `connections` when it resolves.
+ */
 async function waitForConnectedBundle(api: {
   listConnectedBundleIds: () => string[];
 }): Promise<void> {
@@ -176,7 +184,6 @@ describe("a provider that lends its native-devtools agent", () => {
     publishDescriptor({ socketPath: agent.socketPath });
 
     const instance = await instantiate();
-    await waitForConnectedBundle(instance.api);
 
     expect(instance.api.listConnectedBundleIds()).toEqual([BUNDLE_ID]);
     expect(instance.api.isConnected(BUNDLE_ID)).toBe(true);
@@ -191,7 +198,7 @@ describe("a provider that lends its native-devtools agent", () => {
     publishDescriptor({ socketPath: agent.socketPath });
 
     const instance = await instantiate();
-    await waitForConnectedBundle(instance.api);
+    expect(instance.api.listConnectedBundleIds()).toEqual([BUNDLE_ID]);
 
     await expect(
       instance.api.queryViewHierarchy(BUNDLE_ID, "ViewHierarchy.describeScreen")
@@ -217,7 +224,7 @@ describe("a provider that lends its native-devtools agent", () => {
     publishDescriptor({ socketPath: agent.socketPath });
 
     const instance = await instantiate();
-    await waitForConnectedBundle(instance.api);
+    expect(instance.api.listConnectedBundleIds()).toEqual([BUNDLE_ID]);
 
     expect(instance.api.isEnvSetup()).toBe(true);
     expect(instance.api.getInitFailure()).toBeNull();
@@ -235,7 +242,7 @@ describe("a provider that lends its native-devtools agent", () => {
     publishDescriptor({ socketPath: agent.socketPath });
 
     const instance = await instantiate();
-    await waitForConnectedBundle(instance.api);
+    expect(instance.api.listConnectedBundleIds()).toEqual([BUNDLE_ID]);
     await instance.dispose();
 
     expect(fs.existsSync(agent.socketPath)).toBe(true);
@@ -252,7 +259,7 @@ describe("a provider that lends its native-devtools agent", () => {
     publishDescriptor({ socketPath: agent.socketPath });
 
     const instance = await instantiate();
-    await waitForConnectedBundle(instance.api);
+    expect(instance.api.listConnectedBundleIds()).toEqual([BUNDLE_ID]);
 
     const { nativeNetworkLogsTool } =
       await import("../src/tools/native-devtools/native-network-logs");
@@ -279,7 +286,7 @@ describe("a provider that lends its native-devtools agent", () => {
     publishDescriptor({ socketPath: agent.socketPath });
 
     const instance = await instantiate();
-    await waitForConnectedBundle(instance.api);
+    expect(instance.api.listConnectedBundleIds()).toEqual([BUNDLE_ID]);
 
     const terminated = new Promise<void>((resolve) =>
       instance.events.on("terminated", () => resolve())
@@ -290,7 +297,6 @@ describe("a provider that lends its native-devtools agent", () => {
 
     /** A fresh resolve attaches again and re-adopts the app on offer. */
     const reattached = await instantiate();
-    await waitForConnectedBundle(reattached.api);
     expect(reattached.api.listConnectedBundleIds()).toEqual([BUNDLE_ID]);
 
     await reattached.dispose();
@@ -304,7 +310,7 @@ describe("a provider that lends its native-devtools agent", () => {
     publishDescriptor({ socketPath: agent.socketPath });
 
     const instance = await instantiate();
-    await waitForConnectedBundle(instance.api);
+    expect(instance.api.listConnectedBundleIds()).toEqual([BUNDLE_ID]);
 
     let terminated = false;
     instance.events.on("terminated", () => {
@@ -409,6 +415,47 @@ describe("a provider that lends its native-devtools agent", () => {
 
       await agent.close();
     });
+
+    /**
+     * Shutdown tears the service down while the factory waits and the registry
+     * has no instance to dispose yet. Its abort is the only thing that reaches
+     * the wait.
+     */
+    it("stops waiting and hangs up when the service is torn down", async () => {
+      const agent = await startLentAgent({ handshake: "manual" });
+      publishDescriptor({ socketPath: agent.socketPath });
+
+      const teardown = new AbortController();
+      const startedAt = Date.now();
+      const attaching = instantiate(DEVICE_ID, teardown.signal);
+
+      while (agent.peerCount() === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      const hungUp = new Promise<void>((resolve) => agent.onPeerClosed(resolve));
+      teardown.abort();
+
+      await expect(attaching).rejects.toThrow();
+      expect(Date.now() - startedAt).toBeLessThan(NATIVE_DEVTOOLS_ATTACH_HANDSHAKE_TIMEOUT_MS / 2);
+      await hungUp;
+
+      await agent.close();
+    });
+
+    it("gives up at once when the service was torn down before the factory ran", async () => {
+      const agent = await startLentAgent({ handshake: "manual" });
+      publishDescriptor({ socketPath: agent.socketPath });
+
+      const teardown = new AbortController();
+      teardown.abort();
+
+      const startedAt = Date.now();
+      await expect(instantiate(DEVICE_ID, teardown.signal)).rejects.toThrow();
+      expect(Date.now() - startedAt).toBeLessThan(NATIVE_DEVTOOLS_ATTACH_HANDSHAKE_TIMEOUT_MS / 2);
+
+      await agent.close();
+    });
   });
 
   it("refuses to inject when the provider granted the mechanism but lent no socket", async () => {
@@ -437,7 +484,6 @@ describe("a provider that lends its native-devtools agent", () => {
       publishDescriptor({ socketPath: agent.socketPath });
 
       const instance = await instantiate(IOS_UDID);
-      await waitForConnectedBundle(instance.api);
 
       expect(instance.api.socketPath).toBe(agent.socketPath);
       expect(instance.api.isEnvSetup()).toBe(true);

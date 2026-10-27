@@ -591,7 +591,7 @@ export const nativeDevtoolsBlueprint: ServiceBlueprint<NativeDevtoolsApi, Device
     return `${NATIVE_DEVTOOLS_NAMESPACE}:${device.id}`;
   },
 
-  async factory(_deps, _payload, options) {
+  async factory(_deps, _payload, options, signal) {
     const opts = options as unknown as NativeDevtoolsFactoryOptions | undefined;
     if (!opts?.device) {
       throw new FailureError(
@@ -901,12 +901,23 @@ export const nativeDevtoolsBlueprint: ServiceBlueprint<NativeDevtoolsApi, Device
 
     if (lentSocketPath) {
       /**
+       * The socket we are dialling or waiting on. Shutdown can land in either
+       * wait and the registry has no instance to dispose until we return, so
+       * hanging up here is what ends the wait. The registry then reports the
+       * teardown rather than the error this causes.
+       */
+      let pending: net.Socket | null = null;
+      const hangUp = () => pending?.destroy(new Error("the service was torn down"));
+      signal?.addEventListener("abort", hangUp, { once: true });
+
+      /**
        * Dial the provider's socket, which plays the agent's side. Failing here
        * beats degrading, the descriptor advertised it, so a refusal is worth
        * saying out loud rather than surfacing later as empty results.
        */
       lentSocket = await new Promise<net.Socket>((resolve, reject) => {
         const socket = net.connect(lentSocketPath);
+        pending = socket;
 
         const onError = (err: NodeJS.ErrnoException) => {
           socket.destroy();
@@ -932,6 +943,8 @@ export const nativeDevtoolsBlueprint: ServiceBlueprint<NativeDevtoolsApi, Device
           socket.off("error", onError);
           resolve(socket);
         });
+
+        if (signal?.aborted) hangUp();
       });
 
       const attached = lentSocket;
@@ -956,7 +969,11 @@ export const nativeDevtoolsBlueprint: ServiceBlueprint<NativeDevtoolsApi, Device
 
         attached.once("close", onClose);
         serveAgentConnection(attached, () => finish(false));
+        /** Closed before we got here, so `close` has already fired. */
+        if (attached.destroyed) onClose();
       });
+
+      signal?.removeEventListener("abort", hangUp);
 
       /**
        * Nothing to keep: the registry sets `node.instance` only once the
