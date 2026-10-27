@@ -117,7 +117,7 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AddressInfo } from "node:net";
-import { listDevicesTool } from "../src/tools/devices/list-devices";
+import { EXTERNAL_FOLDABLE_BUDGET_MS, listDevicesTool } from "../src/tools/devices/list-devices";
 import { listIosPhysicalDevices } from "../src/utils/ios-device/devicectl";
 import { isFoldableSimulator, listIosSimulators } from "../src/utils/ios-devices";
 import {
@@ -805,6 +805,67 @@ describe("list-devices — external provider shadows", () => {
     );
 
     expect(claimed).toMatchObject({ external: true, foldable: true });
+  });
+
+  it("lists every lent device, without the flag, when the foldable check overruns its budget", async () => {
+    /**
+     * A slow CoreSimulator can hold the foldable check's `simctl` calls past
+     * the branch deadline, which would drop the whole external result. The
+     * check has its own budget, so the lent devices (the Android one too) are
+     * listed without the flag instead.
+     */
+    const descriptor = JSON.parse(fs.readFileSync(descriptorPath, "utf8"));
+
+    descriptor.devices.push({
+      capabilities: ["adb"],
+      kind: "emulator",
+      name: "Pixel 8",
+      nativeId: "emulator-5554",
+      platform: "android",
+      state: "Booted",
+    });
+
+    fs.writeFileSync(descriptorPath, JSON.stringify(descriptor));
+
+    let checkStarted: (() => void) | undefined;
+
+    const started = new Promise<void>((resolve) => {
+      checkStarted = resolve;
+    });
+
+    vi.mocked(isFoldableSimulator).mockImplementationOnce(() => {
+      checkStarted?.();
+      return new Promise<boolean>(() => {});
+    });
+
+    execFileMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "adb" && args[0] === "devices") {
+        return { stderr: "", stdout: "List of devices attached\n" };
+      }
+
+      return { stderr: "", stdout: "" };
+    });
+
+    /**
+     * Only `setTimeout` is faked, so I/O still runs and time moves only once
+     * the liveness probe has passed and the check has started.
+     */
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+    try {
+      const pending = listDevicesTool.execute!({}, {});
+      await started;
+      await vi.advanceTimersByTimeAsync(EXTERNAL_FOLDABLE_BUDGET_MS);
+      const result = await pending;
+
+      const lent = result.devices.filter((device) => "external" in device);
+      expect(lent.map((device) => ("udid" in device ? device.udid : device.serial))).toEqual(
+        expect.arrayContaining([`ext:acme-3f2a9c:${CLAIMED_UDID}`, "ext:acme-3f2a9c:emulator-5554"])
+      );
+      expect(lent.some((device) => "foldable" in device)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("leaves an unclaimed simulator in the plain listing", async () => {
