@@ -316,7 +316,7 @@ async function withFoldableFlags(external: readonly ExternalDevice[]): Promise<E
   if (simulators.length === 0) return external.map((device) => ({ device, foldable: false }));
 
   let timer: ReturnType<typeof setTimeout> | undefined;
-  
+
   const budget = new Promise<false>((resolve) => {
     timer = setTimeout(() => resolve(false), EXTERNAL_FOLDABLE_BUDGET_MS);
   });
