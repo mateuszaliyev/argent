@@ -1,12 +1,11 @@
 import { z } from "zod";
 import { ServiceState, isLiveServiceState } from "@argent/registry";
 import type { Registry, ToolDefinition } from "@argent/registry";
-import { SIMULATOR_SERVER_NAMESPACE } from "../../blueprints/simulator-server";
-import { externalClaimForNativeId, isExternalDeviceUrn } from "../../utils/external-devices";
 import {
   DEVICE_OWNED_NAMESPACES,
   PORT_KEYED_NAMESPACES,
   deviceIdOwningUrn,
+  isBorrowedSimulatorServer,
   isDeviceServiceUrn,
   unnameableSessionUrns,
 } from "./device-services";
@@ -73,7 +72,7 @@ export function createStopAllSimulatorServersTool(
     description: `Stop the services a device owns - simulator-server processes (iOS + Android), native devtools, the iOS accessibility service, TV-control daemons, Chromium CDP sessions, screen recordings, native profiler sessions, and JS-runtime debugger sessions along with the network inspectors and React profiler sessions that ride on them - freeing their spawned processes, sockets and ports. Call this when your session ends or the user says they are done.
 PASS \`devices\` with the device ids this session used: one tool-server serves every agent, subagent and CLI call using this argent install, and an unscoped call tears down THEIR devices too (a mid-recording devtools teardown degrades another agent's flow to brittle coordinate taps; that agent is warned, but its recorded steps are already the worse kind). Omit \`devices\` only when a machine-wide cleanup is what you actually want. Passing an EMPTY array scopes to nothing and stops nothing - it is not a way to ask for the machine-wide sweep.
 A JS-runtime debugger session is keyed by the id you called \`debugger-connect\` with. On a Metro serving two or more devices that id is not a udid or serial - connect refuses those and tells you to re-target with the \`logicalDeviceId\` it returns - so a scope built from \`list-devices\` ids cannot reach that session. Pass any such \`logicalDeviceId\` in \`devices\` ALONGSIDE the device id; { left_running } names the ones you missed.
-Returns { stopped } - the URNs of the services that were actually live and got shut down; an ERROR node is disposed too but never appears there, so an empty \`stopped\` only means nothing was still running. { unmatched } lists supplied ids that own no service here, so a mistyped id - or a device NAME passed where an id was expected - does not read as a clean machine. It is NOT proof the id is wrong: a Vega device is driven through CLI/adb shell-outs, so one you only booted and drove with the remote registers no service and always lands here, as does a real device of any platform this session never started anything on. Present ONLY when \`devices\` was supplied AND at least one id matched nothing - absent on an unscoped call and when every id matched. Stopping the same device twice does not report it unmatched: ownership counts regardless of service state. { left_running } lists the URNs of live debugger sessions (and the network inspectors / React profiler sessions riding on them) whose id no device scope can name - re-call with the id after each URN's \`<namespace>:<port>:\` prefix to reap them. { aborted: true } means the caller cancelled the request part-way, so the rest of the machine was left untouched and neither of the other two fields was computed. Past the schema - which rejects an unknown key outright, so the \`udids\` slip is an error rather than a silent machine-wide sweep - the call always succeeds; reaping nothing is a result, not a failure.`,
+Returns { stopped } - the URNs of the services that were actually live and got shut down; an ERROR node is disposed too but never appears there. A simulator-server that a device provider runs (a device with an \`ext:\` id, or one Argent attached to under its plain UDID / serial) is not Argent's to stop: the cached handle is dropped, the provider's server keeps running, and it never appears in \`stopped\`. So an empty \`stopped\` means nothing of Argent's own was still running. { unmatched } lists supplied ids that own no service here, so a mistyped id - or a device NAME passed where an id was expected - does not read as a clean machine. It is NOT proof the id is wrong: a Vega device is driven through CLI/adb shell-outs, so one you only booted and drove with the remote registers no service and always lands here, as does a real device of any platform this session never started anything on. Present ONLY when \`devices\` was supplied AND at least one id matched nothing - absent on an unscoped call and when every id matched. Stopping the same device twice does not report it unmatched: ownership counts regardless of service state. { left_running } lists the URNs of live debugger sessions (and the network inspectors / React profiler sessions riding on them) whose id no device scope can name - re-call with the id after each URN's \`<namespace>:<port>:\` prefix to reap them. { aborted: true } means the caller cancelled the request part-way, so the rest of the machine was left untouched and neither of the other two fields was computed. Past the schema - which rejects an unknown key outright, so the \`udids\` slip is an error rather than a silent machine-wide sweep - the call always succeeds; reaping nothing is a result, not a failure.`,
     zodSchema,
     services: () => ({}),
     async execute(_services, params, ctx) {
@@ -111,7 +110,7 @@ Returns { stopped } - the URNs of the services that were actually live and got s
           // is disposed too, but was never a running server, so it is not
           // reported stopped.
           const wasLive = isLiveServiceState(entry.state);
-          const borrowed = isBorrowedSimulatorServerUrn(urn);
+          const borrowed = await isBorrowedSimulatorServer(registry, urn);
           await registry.disposeService(urn);
           if (wasLive && !borrowed) stopped.push(urn);
         } else if (
@@ -152,26 +151,4 @@ Returns { stopped } - the URNs of the services that were actually live and got s
       return result;
     },
   };
-}
-
-/**
- * The simulator-server of a device from an external provider is borrowed: it is
- * disposed (dropping our cached handle) but never reported as stopped. Its
- * `dispose()` is a no-op by design, so nothing was actually shut down and
- * claiming otherwise would tell the agent it had cleaned up a server it does
- * not own. Every other service of that device (AXService, NativeDevtools, ...)
- * is Argent's own and really is shut down, so it is reported like any other.
- *
- * The device can be driven by its `ext:` id or by its plain UDID / serial,
- * which the simulator-server factory also attaches to the provider's server
- * while the provider claims it, so both spellings count.
- */
-function isBorrowedSimulatorServerUrn(urn: string): boolean {
-  const prefix = `${SIMULATOR_SERVER_NAMESPACE}:`;
-
-  if (!urn.startsWith(prefix)) return false;
-
-  return (
-    isExternalDeviceUrn(urn) || externalClaimForNativeId(urn.slice(prefix.length)) !== undefined
-  );
 }

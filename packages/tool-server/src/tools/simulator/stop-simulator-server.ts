@@ -2,8 +2,11 @@ import { z } from "zod";
 import { ServiceState, isLiveServiceState } from "@argent/registry";
 import type { Registry, ToolDefinition } from "@argent/registry";
 import { resolveDevice } from "../../utils/device-info";
-import { externalClaimForNativeId, isExternalId } from "../../utils/external-devices";
-import { deviceIdOwningUrn, transportNamespacesForPlatform } from "./device-services";
+import {
+  deviceIdOwningUrn,
+  isBorrowedSimulatorServer,
+  transportNamespacesForPlatform,
+} from "./device-services";
 
 const zodSchema = z.object({
   udid: z
@@ -24,7 +27,7 @@ export function createStopSimulatorServerTool(
       failedMsg: ({ params, failureSignal }) =>
         `Failed to stop simulator server for ${params.udid}: ${failureSignal.error_code}`,
     },
-    description: `Stop the transport session for a specific device (iOS simulator / Android: simulator-server process; physical iOS: the on-device runner; Chromium: CDP WebSocket) and free its resources; on a TV target it also reaps that device's TV-control daemons. Use when you are done interacting with one device but want to keep others running, or to restart a wedged transport. On iOS / Android / TV it deliberately leaves this device's native-devtools, accessibility, profiler and debugger services running - to drain those as well, use stop-all-simulator-servers with \`devices\`. On CHROMIUM that does not hold: the JS-runtime debugger declares the CDP session as a dependency, so stopping the transport cascades to it and its captured console history goes with it - reconnect with debugger-connect afterwards. Returns { stopped, udid }. Fails silently if no session is open for the given id.`,
+    description: `Stop the transport session for a specific device (iOS simulator / Android: simulator-server process; physical iOS: the on-device runner; Chromium: CDP WebSocket) and free its resources; on a TV target it also reaps that device's TV-control daemons. Use when you are done interacting with one device but want to keep others running, or to restart a wedged transport. On iOS / Android / TV it deliberately leaves this device's native-devtools, accessibility, profiler and debugger services running - to drain those as well, use stop-all-simulator-servers with \`devices\`. On CHROMIUM that does not hold: the JS-runtime debugger declares the CDP session as a dependency, so stopping the transport cascades to it and its captured console history goes with it - reconnect with debugger-connect afterwards. For a device lent by a device provider (an \`ext:\` id, or its plain UDID / serial while Argent is attached to the provider's server), the provider's simulator-server is not Argent's to stop: the cached handle is dropped, the server keeps running, and it does not count as stopped. Returns { stopped, udid }. Fails silently if no session is open for the given id.`,
     zodSchema,
     services: () => ({}),
     async execute(_services, params) {
@@ -36,16 +39,6 @@ export function createStopSimulatorServerTool(
       // draining everything this device owns.
       const platform = resolveDevice(udid).platform;
       const namespaces = transportNamespacesForPlatform(platform);
-
-      /**
-       * An external device has no server of ours to stop. Its `dispose()` is
-       * a no-op by design. Still drop the cached handles so the next call
-       * re-resolves against the provider's state, but report `stopped: false`.
-       * A clean no-op beats an error for an agent that calls this on every device.
-       * The plain UDID / serial of a device the provider claims attaches to the
-       * same borrowed server, so it counts too.
-       */
-      const external = isExternalId(udid) || externalClaimForNativeId(udid) !== undefined;
 
       const snapshot = registry.getSnapshot();
       let stopped = false;
@@ -59,7 +52,12 @@ export function createStopSimulatorServerTool(
         const entry = snapshot.services.get(urn);
         if (!entry || entry.state === ServiceState.IDLE) continue;
 
-        if (external) {
+        // A provider's simulator-server is borrowed and its `dispose()` is a
+        // no-op by design: drop the cached handle so the next call re-resolves
+        // against the provider's state, but do not report it stopped. Only that
+        // one URN is borrowed; TvControl and IosDeviceRunner of the same device
+        // are Argent's own and fall through like any other.
+        if (await isBorrowedSimulatorServer(registry, urn)) {
           await registry.disposeService(urn);
           continue;
         }
