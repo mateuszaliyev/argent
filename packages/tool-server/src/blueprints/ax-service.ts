@@ -17,11 +17,7 @@ import { pickIosHost, type IosEndpoint } from "../utils/ios-host";
 import { axServiceSocketPath } from "../utils/socket-tag";
 
 // Moved to ../utils/ax-prefs; re-exported so existing import paths keep working.
-export {
-  ensureAutomationEnabled,
-  isEntitlementBypassActive,
-  setAccessibilityPrefsPreBoot,
-} from "../utils/ax-prefs";
+export { ensureAutomationEnabled, setAccessibilityPrefsPreBoot } from "../utils/ax-prefs";
 
 export const AX_SERVICE_NAMESPACE = "AXService";
 

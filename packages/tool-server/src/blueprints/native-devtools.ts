@@ -420,7 +420,7 @@ export interface NetworkEvent {
   timestamp: number;
 }
 
-export type ViewInspectorMethod =
+type ViewInspectorMethod =
   | "ViewHierarchy.getFullHierarchy"
   | "ViewHierarchy.findViews"
   | "ViewHierarchy.viewAtPoint"
@@ -429,7 +429,7 @@ export type ViewInspectorMethod =
 
 type InspectorMethod = ViewInspectorMethod | "Application.getState";
 
-export type NativeApplicationState = "active" | "inactive" | "background" | "unknown";
+type NativeApplicationState = "active" | "inactive" | "background" | "unknown";
 
 export interface NativeAppState {
   bundleId: string;
